@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import traceback
 from pathlib import Path
@@ -11,6 +12,8 @@ from app.services.carbon_runner import CarbonRunner
 from app.services.patch_engine import PatchEngine
 from app.services.repo_analyzer import RepoAnalyzer
 
+logger = logging.getLogger("greenpull")
+
 
 def _update_job(db: Session, job_id: str, **kwargs):
     db.query(Job).filter(Job.id == job_id).update(kwargs)
@@ -21,14 +24,20 @@ def _install_dependencies(clone_path: Path):
     """Install repo dependencies before running training."""
     req_file = clone_path / "requirements.txt"
     if req_file.exists():
-        subprocess.run(
+        logger.info(f"[Deps] Installing from requirements.txt")
+        result = subprocess.run(
             ["pip", "install", "-r", str(req_file)],
             cwd=str(clone_path),
             capture_output=True,
+            text=True,
             timeout=300,
         )
-    # Also check for pyproject.toml with pip install .
+        if result.returncode != 0:
+            logger.warning(f"[Deps] pip install failed:\n{result.stderr[-1000:]}")
+        else:
+            logger.info("[Deps] pip install succeeded")
     elif (clone_path / "pyproject.toml").exists():
+        logger.info(f"[Deps] Installing from pyproject.toml")
         subprocess.run(
             ["pip", "install", "-e", "."],
             cwd=str(clone_path),
@@ -36,12 +45,15 @@ def _install_dependencies(clone_path: Path):
             timeout=300,
         )
     elif (clone_path / "setup.py").exists():
+        logger.info(f"[Deps] Installing from setup.py")
         subprocess.run(
             ["pip", "install", "-e", "."],
             cwd=str(clone_path),
             capture_output=True,
             timeout=300,
         )
+    else:
+        logger.info("[Deps] No requirements.txt, pyproject.toml, or setup.py found")
 
 
 def run_pipeline(
@@ -51,23 +63,36 @@ def run_pipeline(
     country_iso_code: str = "USA",
     max_training_seconds: int = 300,
 ):
+    # Setup logging for this run
+    _setup_logging()
+
+    logger.info("=" * 60)
+    logger.info(f"[Pipeline] START job={job_id[:8]}...")
+    logger.info(f"[Pipeline] repo={repo_url}")
+    logger.info(f"[Pipeline] patch={patch_type}, country={country_iso_code}, timeout={max_training_seconds}s")
+    logger.info("=" * 60)
+
     db = SessionLocal()
     try:
         # --- 1. Clone ---
+        logger.info("[Pipeline] STEP 1: Cloning repository")
         _update_job(db, job_id, status=JobStatus.CLONING)
         analyzer = RepoAnalyzer()
         clone_path = analyzer.clone_repo(repo_url, job_id)
         _update_job(db, job_id, clone_path=str(clone_path))
 
         # --- 1b. Install dependencies ---
+        logger.info("[Pipeline] STEP 1b: Installing dependencies")
         _install_dependencies(clone_path)
 
         # --- 2. Detect entrypoint (regex + iterative GPT) ---
+        logger.info("[Pipeline] STEP 2: Detecting training entrypoint")
         _update_job(db, job_id, status=JobStatus.ANALYZING)
         candidates = analyzer.scan_for_candidates(clone_path)
         detection = analyzer.analyze_scripts_iteratively(candidates, clone_path)
 
         if detection.entrypoint_file is None:
+            logger.error("[Pipeline] FAILED: Could not identify training entrypoint")
             _update_job(
                 db, job_id,
                 status=JobStatus.FAILED,
@@ -75,6 +100,10 @@ def run_pipeline(
                 detection_reasoning=detection.reasoning,
             )
             return
+
+        logger.info(f"[Pipeline] Detected entrypoint: {detection.entrypoint_file}")
+        logger.info(f"[Pipeline] Run command: {detection.run_command}")
+        logger.info(f"[Pipeline] Framework: {detection.framework}")
 
         _update_job(
             db, job_id,
@@ -85,6 +114,7 @@ def run_pipeline(
         )
 
         # --- 3. Run baseline ---
+        logger.info("[Pipeline] STEP 3: Running BASELINE measurement")
         _update_job(db, job_id, status=JobStatus.RUNNING_BASELINE)
         runner = CarbonRunner(country_iso_code=country_iso_code)
         results_baseline = Path(settings.RESULTS_DIR) / job_id / "baseline"
@@ -96,6 +126,9 @@ def run_pipeline(
             project_name=f"greenpull-baseline-{job_id[:8]}",
             timeout=max_training_seconds,
         )
+
+        logger.info(f"[Pipeline] Baseline: {baseline.emissions_kg:.6f} kg CO2, "
+                     f"{baseline.energy_kwh:.6f} kWh, {baseline.duration_s:.1f}s")
 
         _update_job(
             db, job_id,
@@ -110,6 +143,7 @@ def run_pipeline(
         )
 
         # --- 4. Apply patch ---
+        logger.info(f"[Pipeline] STEP 4: Applying {patch_type} patch")
         _update_job(db, job_id, status=JobStatus.PATCHING)
         patcher = PatchEngine()
         _, diff = patcher.apply_patch(
@@ -121,6 +155,7 @@ def run_pipeline(
         _update_job(db, job_id, patch_type=patch_type, patch_diff=diff)
 
         # --- 5. Run optimized ---
+        logger.info("[Pipeline] STEP 5: Running OPTIMIZED measurement")
         _update_job(db, job_id, status=JobStatus.RUNNING_OPTIMIZED)
         results_optimized = Path(settings.RESULTS_DIR) / job_id / "optimized"
 
@@ -131,6 +166,9 @@ def run_pipeline(
             project_name=f"greenpull-optimized-{job_id[:8]}",
             timeout=max_training_seconds,
         )
+
+        logger.info(f"[Pipeline] Optimized: {optimized.emissions_kg:.6f} kg CO2, "
+                     f"{optimized.energy_kwh:.6f} kWh, {optimized.duration_s:.1f}s")
 
         _update_job(
             db, job_id,
@@ -148,6 +186,13 @@ def run_pipeline(
         en_saved = baseline.energy_kwh - optimized.energy_kwh
         en_pct = (en_saved / baseline.energy_kwh * 100) if baseline.energy_kwh > 0 else 0
 
+        logger.info("=" * 60)
+        logger.info("[Pipeline] STEP 6: RESULTS")
+        logger.info(f"  Emissions saved: {em_saved:.6f} kg CO2 ({em_pct:.1f}%)")
+        logger.info(f"  Energy saved:    {en_saved:.6f} kWh ({en_pct:.1f}%)")
+        logger.info(f"  Water saved:     {baseline.water_l - optimized.water_l:.4f} L")
+        logger.info("=" * 60)
+
         _update_job(
             db, job_id,
             status=JobStatus.COMPLETED,
@@ -157,7 +202,11 @@ def run_pipeline(
             energy_saved_pct=en_pct,
         )
 
+        logger.info(f"[Pipeline] DONE job={job_id[:8]}")
+
     except Exception as e:
+        logger.error(f"[Pipeline] FAILED: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
         _update_job(
             db, job_id,
             status=JobStatus.FAILED,
@@ -165,3 +214,15 @@ def run_pipeline(
         )
     finally:
         db.close()
+
+
+def _setup_logging():
+    """Configure the greenpull logger for debug output."""
+    log = logging.getLogger("greenpull")
+    if not log.handlers:
+        log.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
+        handler.setFormatter(fmt)
+        log.addHandler(handler)

@@ -1,11 +1,14 @@
 import difflib
+import logging
 import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 from openai import OpenAI
 
 from app.core.config import settings
+
+logger = logging.getLogger("greenpull")
 
 
 class PatchEngine:
@@ -22,6 +25,10 @@ class PatchEngine:
         file_path = repo_path / entrypoint_file
         original_code = file_path.read_text()
 
+        logger.info(f"[Patch] Applying '{patch_type}' patch to {entrypoint_file} (framework={framework})")
+        logger.info(f"[Patch] Original code: {len(original_code)} chars, "
+                     f"{len(original_code.splitlines())} lines")
+
         if patch_type == "amp":
             patched_code = self._apply_amp(original_code, framework, entrypoint_file)
         elif patch_type == "lora":
@@ -34,7 +41,11 @@ class PatchEngine:
 
         # Safety: if GPT returned empty/garbage, keep original code
         if not patched_code or len(patched_code) < 20:
+            logger.warning("[Patch] GPT returned empty/short code, keeping original")
             patched_code = original_code
+
+        logger.info(f"[Patch] Patched code: {len(patched_code)} chars, "
+                     f"{len(patched_code.splitlines())} lines")
 
         file_path.write_text(patched_code)
 
@@ -44,6 +55,8 @@ class PatchEngine:
             fromfile="original",
             tofile="optimized",
         ))
+
+        logger.info(f"[Patch] Diff:\n{diff[:3000]}")
 
         return patched_code, diff
 
@@ -77,6 +90,7 @@ RULES:
 - Preserve all original functionality.
 - The code must be syntactically valid Python."""
 
+        logger.debug(f"[Patch] AMP prompt length: {len(prompt)} chars")
         return self._call_gpt(prompt)
 
     def _apply_lora(self, code: str, framework: str, filename: str) -> str:
@@ -104,6 +118,7 @@ RULES:
 - Preserve all original functionality.
 - The code must be syntactically valid Python."""
 
+        logger.debug(f"[Patch] LoRA prompt length: {len(prompt)} chars")
         return self._call_gpt(prompt)
 
     def _call_gpt(self, prompt: str) -> str:
@@ -115,6 +130,8 @@ RULES:
         )
         text = response.choices[0].message.content or ""
         text = text.strip()
+
+        logger.debug(f"[Patch] GPT raw response ({len(text)} chars):\n{text[:1000]}")
 
         # Extract code from markdown block if GPT wrapped it
         if "```python" in text:

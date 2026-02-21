@@ -1,18 +1,13 @@
+import logging
 import os
 import signal
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import settings
+from codecarbon import OfflineEmissionsTracker
 
-# Add vendored codecarbon to path
-CODECARBON_PATH = str(settings.PROJECT_ROOT / "codecarbon")
-if CODECARBON_PATH not in sys.path:
-    sys.path.insert(0, CODECARBON_PATH)
-
-from codecarbon import OfflineEmissionsTracker  # noqa: E402
+logger = logging.getLogger("greenpull")
 
 
 @dataclass
@@ -41,6 +36,10 @@ class CarbonRunner:
     ) -> EmissionsResult:
         os.makedirs(results_dir, exist_ok=True)
 
+        logger.info(f"[CarbonRunner] command: {run_command}")
+        logger.info(f"[CarbonRunner] working_dir: {working_dir}")
+        logger.info(f"[CarbonRunner] country: {self.country_iso_code}, timeout: {timeout}s")
+
         tracker = OfflineEmissionsTracker(
             country_iso_code=self.country_iso_code,
             project_name=project_name,
@@ -52,7 +51,6 @@ class CarbonRunner:
         tracker.start()
         proc = None
         try:
-            # Use Popen with process group so we can kill the whole tree on timeout
             proc = subprocess.Popen(
                 run_command,
                 shell=True,
@@ -64,6 +62,11 @@ class CarbonRunner:
                 preexec_fn=os.setsid,
             )
             stdout, stderr = proc.communicate(timeout=timeout)
+
+            logger.debug(f"[CarbonRunner] STDOUT:\n{stdout[-3000:]}")
+            if stderr:
+                logger.debug(f"[CarbonRunner] STDERR:\n{stderr[-3000:]}")
+
             if proc.returncode != 0:
                 raise RuntimeError(
                     f"Training command failed (exit {proc.returncode}):\n"
@@ -71,7 +74,7 @@ class CarbonRunner:
                     f"STDERR: {stderr[-2000:]}"
                 )
         except subprocess.TimeoutExpired:
-            # Kill entire process group
+            logger.warning(f"[CarbonRunner] Timeout after {timeout}s, killing process")
             if proc:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait()
@@ -80,7 +83,7 @@ class CarbonRunner:
 
         data = tracker.final_emissions_data
 
-        return EmissionsResult(
+        result = EmissionsResult(
             emissions_kg=data.emissions,
             energy_kwh=data.energy_consumed,
             duration_s=data.duration,
@@ -90,3 +93,8 @@ class CarbonRunner:
             cpu_model=data.cpu_model,
             gpu_model=data.gpu_model,
         )
+
+        logger.info(f"[CarbonRunner] Results: {result.emissions_kg:.6f} kg CO2, "
+                     f"{result.energy_kwh:.6f} kWh, {result.duration_s:.1f}s")
+
+        return result

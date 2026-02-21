@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o"
 
     COUNTRY_ISO_CODE: str = "USA"
+    DEBUG: bool = True
 
     class Config:
         env_file = Path(__file__).resolve().parents[2] / ".env"

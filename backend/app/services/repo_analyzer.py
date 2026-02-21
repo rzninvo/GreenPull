@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ import git
 from openai import OpenAI
 
 from app.core.config import settings
+
+logger = logging.getLogger("greenpull")
 
 # --- Regex patterns for heuristic scoring ---
 
@@ -77,22 +80,26 @@ class RepoAnalyzer:
         dest = self.clone_dir / job_id
         if dest.exists():
             shutil.rmtree(dest)
+        logger.info(f"[Clone] Cloning {repo_url} -> {dest}")
         git.Repo.clone_from(repo_url, str(dest), depth=1)
+        logger.info(f"[Clone] Done")
         return dest
 
     # ---- Phase B: Regex/heuristic scan ----
 
     def scan_for_candidates(self, repo_path: Path) -> list[CandidateScript]:
+        logger.info(f"[Scan] Scanning {repo_path} for training scripts...")
         candidates = []
+        total_py = 0
 
         for root, dirs, files in os.walk(repo_path):
-            # Prune skip dirs
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
 
             for fname in files:
                 if not fname.endswith(".py"):
                     continue
 
+                total_py += 1
                 full_path = Path(root) / fname
                 rel_path = str(full_path.relative_to(repo_path))
 
@@ -101,7 +108,6 @@ class RepoAnalyzer:
                 except Exception:
                     continue
 
-                # Skip very small files (likely __init__.py or empty)
                 if len(content.strip()) < 50:
                     continue
 
@@ -120,16 +126,14 @@ class RepoAnalyzer:
                     score += 35
                     patterns_found.append("finetune_filename")
 
-                # Check positive patterns
                 for pattern, points, label in POSITIVE_PATTERNS:
                     if re.search(pattern, content):
                         score += points
                         patterns_found.append(label)
 
-                # Check negative patterns
                 for pattern, points, label in NEGATIVE_PATTERNS:
                     if re.search(pattern, content):
-                        score += points  # points are negative
+                        score += points
                         patterns_found.append(label)
 
                 if score > 30:
@@ -140,11 +144,14 @@ class RepoAnalyzer:
                         content=content,
                     ))
 
-        # Sort by score descending
         candidates.sort(key=lambda c: c.score, reverse=True)
+        candidates = candidates[:10]
 
-        # Cap at top 10 candidates
-        return candidates[:10]
+        logger.info(f"[Scan] Scanned {total_py} .py files, found {len(candidates)} candidates:")
+        for c in candidates:
+            logger.info(f"  {c.path:40s}  score={c.score:4d}  patterns={c.patterns}")
+
+        return candidates
 
     # ---- Phase C: Iterative GPT analysis ----
 
@@ -152,16 +159,18 @@ class RepoAnalyzer:
         self, candidates: list[CandidateScript], repo_path: Path
     ) -> DetectionResult:
         if not candidates:
+            logger.warning("[Detect] No candidates found by heuristic scan.")
             return DetectionResult(reasoning="No candidate training scripts found by heuristic scan.")
 
-        # Collect dependency context
         dep_context = self._get_dependency_context(repo_path)
+        logger.debug(f"[Detect] Dependency context:\n{dep_context[:500]}")
 
         accumulated_summaries = ""
         best_result = None
 
-        for script in candidates:
-            # Truncate very long files
+        for i, script in enumerate(candidates, 1):
+            logger.info(f"[Detect] Analyzing script {i}/{len(candidates)}: {script.path} (score={script.score})")
+
             content = script.content
             lines = content.splitlines()
             if len(lines) > 500:
@@ -195,6 +204,8 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 
 IMPORTANT: If this is the main training script, set run_command to the minimal command that runs training for 1 epoch or a short run. Override epochs/steps to 1."""
 
+            logger.debug(f"[Detect] GPT prompt length: {len(prompt)} chars")
+
             response = self.client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
@@ -202,15 +213,25 @@ IMPORTANT: If this is the main training script, set run_command to the minimal c
                 temperature=0,
             )
 
-            result = self._parse_gpt_json(response.choices[0].message.content)
+            raw_response = response.choices[0].message.content
+            logger.info(f"[Detect] GPT response for {script.path}:\n{raw_response}")
+
+            result = self._parse_gpt_json(raw_response)
             if result is None:
+                logger.warning(f"[Detect] Failed to parse GPT JSON for {script.path}")
                 continue
 
             summary = result.get("summary", "Could not summarize.")
+            is_main = result.get("is_main_entrypoint", "no")
+            confidence = result.get("confidence", "low")
             accumulated_summaries += f"\n- {script.path} (score={script.score}): {summary}"
 
+            logger.info(f"[Detect] -> is_main={is_main}, confidence={confidence}, "
+                        f"framework={result.get('framework')}")
+
             # Check for early exit
-            if result.get("is_main_entrypoint") == "yes" and result.get("confidence") == "high":
+            if is_main == "yes" and confidence == "high":
+                logger.info(f"[Detect] HIGH CONFIDENCE MATCH: {script.path}")
                 return DetectionResult(
                     entrypoint_file=script.path,
                     run_command=result.get("run_command"),
@@ -219,13 +240,13 @@ IMPORTANT: If this is the main training script, set run_command to the minimal c
                     confidence="high",
                 )
 
-            # Track best candidate so far (prefer "yes" over "partial", higher confidence)
-            if result.get("is_main_entrypoint") in ("yes", "partial"):
+            # Track best candidate so far
+            if is_main in ("yes", "partial"):
                 conf_rank = {"high": 3, "medium": 2, "low": 1}
                 entry_rank = {"yes": 2, "partial": 1}
                 new_score = (
-                    entry_rank.get(result.get("is_main_entrypoint"), 0),
-                    conf_rank.get(result.get("confidence", "low"), 0),
+                    entry_rank.get(is_main, 0),
+                    conf_rank.get(confidence, 0),
                 )
                 if best_result is None:
                     old_score = (0, 0)
@@ -240,15 +261,16 @@ IMPORTANT: If this is the main training script, set run_command to the minimal c
                         run_command=result.get("run_command"),
                         framework=result.get("framework", "unknown"),
                         reasoning=accumulated_summaries,
-                        confidence=result.get("confidence", "low"),
+                        confidence=confidence,
                     )
 
-        # If we found a best candidate but didn't get high confidence, use it
         if best_result and best_result.entrypoint_file:
+            logger.info(f"[Detect] Best candidate: {best_result.entrypoint_file} "
+                        f"(confidence={best_result.confidence})")
             best_result.reasoning = accumulated_summaries
             return best_result
 
-        # Final synthesis: ask GPT to decide based on all summaries
+        logger.info("[Detect] No clear winner, running final synthesis...")
         return self._final_synthesis(accumulated_summaries, candidates)
 
     def _final_synthesis(
@@ -277,8 +299,12 @@ Respond with ONLY valid JSON:
             temperature=0,
         )
 
-        result = self._parse_gpt_json(response.choices[0].message.content)
+        raw = response.choices[0].message.content
+        logger.info(f"[Detect] Final synthesis GPT response:\n{raw}")
+
+        result = self._parse_gpt_json(raw)
         if result is None:
+            logger.error("[Detect] Final synthesis JSON parse failed")
             return DetectionResult(reasoning="GPT could not determine the entrypoint.\n" + accumulated_summaries)
 
         return DetectionResult(
@@ -300,32 +326,17 @@ Respond with ONLY valid JSON:
                 context_parts.append(f"--- {meta_file} ---\n{content}")
         return "\n".join(context_parts) if context_parts else "(no dependency files found)"
 
-    def _collect_file_tree(self, repo_path: Path, max_depth: int = 3) -> str:
-        lines = []
-        for root, dirs, files in os.walk(repo_path):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-            depth = str(root).replace(str(repo_path), "").count(os.sep)
-            if depth >= max_depth:
-                dirs.clear()
-                continue
-            indent = "  " * depth
-            lines.append(f"{indent}{os.path.basename(root)}/")
-            for f in sorted(files):
-                if not f.startswith("."):
-                    lines.append(f"{indent}  {f}")
-        return "\n".join(lines[:200])
-
     @staticmethod
     def _parse_gpt_json(text: str) -> Optional[dict]:
+        if text is None:
+            return None
         text = text.strip()
-        # Strip markdown code blocks if present
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # Try to find JSON object in the text
             match = re.search(r"\{.*\}", text, re.DOTALL)
             if match:
                 try:
