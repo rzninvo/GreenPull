@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from redis import Redis
 from rq import Queue
@@ -8,10 +10,12 @@ from app.core.database import get_db
 from app.models.db_models import Job, JobStatus
 from app.models.schemas import (
     AnalyzeRequest,
+    ComparisonMetricsResponse,
     DetectionResult,
     EmissionsDetail,
     JobCreatedResponse,
     JobStatusResponse,
+    TrainingConfigResponse,
 )
 
 router = APIRouter()
@@ -35,7 +39,6 @@ def analyze_repo(req: AnalyzeRequest, db: Session = Depends(get_db)):
         req.repo_url,
         req.patch_type,
         req.country_iso_code,
-        req.max_training_seconds,
         job_timeout=600,
     )
 
@@ -61,15 +64,31 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
             reasoning=job.detection_reasoning,
         )
 
+    training_config = None
+    if job.training_config_json:
+        tc = json.loads(job.training_config_json)
+        training_config = TrainingConfigResponse(
+            model_type=tc.get("model_type"),
+            model_name=tc.get("model_name"),
+            parameter_count_millions=tc.get("parameter_count_millions"),
+            framework=job.framework,
+            epochs=tc.get("epochs"),
+            batch_size=tc.get("batch_size"),
+            dataset_size_estimate=tc.get("dataset_size_estimate"),
+            estimated_runtime_hours=tc.get("estimated_runtime_hours"),
+            gpu_type=tc.get("gpu_type"),
+            num_gpus=tc.get("num_gpus"),
+            reasoning=tc.get("reasoning"),
+        )
+
     baseline = None
     if job.baseline_emissions_kg is not None:
         baseline = EmissionsDetail(
             emissions_kg=job.baseline_emissions_kg,
             energy_kwh=job.baseline_energy_kwh,
             duration_s=job.baseline_duration_s,
-            cpu_energy=job.baseline_cpu_energy,
-            gpu_energy=job.baseline_gpu_energy,
-            water_l=job.baseline_water_l,
+            cpu_energy_kwh=job.baseline_cpu_energy,
+            gpu_energy_kwh=job.baseline_gpu_energy,
             cpu_model=job.baseline_cpu_model,
             gpu_model=job.baseline_gpu_model,
         )
@@ -80,9 +99,8 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
             emissions_kg=job.optimized_emissions_kg,
             energy_kwh=job.optimized_energy_kwh,
             duration_s=job.optimized_duration_s,
-            cpu_energy=job.optimized_cpu_energy,
-            gpu_energy=job.optimized_gpu_energy,
-            water_l=job.optimized_water_l,
+            cpu_energy_kwh=job.optimized_cpu_energy,
+            gpu_energy_kwh=job.optimized_gpu_energy,
         )
 
     savings = None
@@ -94,17 +112,31 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
             "energy_saved_pct": job.energy_saved_pct,
         }
 
+    comparisons = None
+    if job.tree_months is not None:
+        comparisons = ComparisonMetricsResponse(
+            tree_months=job.tree_months,
+            car_km=job.car_km,
+            smartphone_charges=job.smartphone_charges,
+            streaming_hours=job.streaming_hours,
+            flight_fraction=job.flight_fraction,
+            led_bulb_hours=job.led_bulb_hours,
+        )
+
     return JobStatusResponse(
         job_id=job.id,
         repo_url=job.repo_url,
         status=job.status,
         created_at=job.created_at,
+        estimation_method=job.estimation_method,
         detection=detection,
+        training_config=training_config,
         baseline=baseline,
         optimized=optimized,
         patch_type=job.patch_type,
         patch_diff=job.patch_diff,
         savings=savings,
+        comparisons=comparisons,
         error_message=job.error_message,
     )
 

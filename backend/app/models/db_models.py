@@ -11,9 +11,10 @@ class JobStatus(str, enum.Enum):
     QUEUED = "queued"
     CLONING = "cloning"
     ANALYZING = "analyzing"
-    RUNNING_BASELINE = "running_baseline"
+    EXTRACTING_CONFIG = "extracting_config"
+    ESTIMATING_BASELINE = "estimating_baseline"
     PATCHING = "patching"
-    RUNNING_OPTIMIZED = "running_optimized"
+    ESTIMATING_OPTIMIZED = "estimating_optimized"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -33,13 +34,17 @@ class Job(Base):
     framework = Column(String, nullable=True)
     detection_reasoning = Column(Text, nullable=True)
 
+    # Training config (GPT-extracted)
+    training_config_json = Column(Text, nullable=True)
+    hardware_assumptions = Column(Text, nullable=True)
+    estimation_method = Column(String, nullable=True, default="green_algorithms_v1")
+
     # Baseline results
     baseline_emissions_kg = Column(Float, nullable=True)
     baseline_energy_kwh = Column(Float, nullable=True)
     baseline_duration_s = Column(Float, nullable=True)
     baseline_cpu_energy = Column(Float, nullable=True)
     baseline_gpu_energy = Column(Float, nullable=True)
-    baseline_water_l = Column(Float, nullable=True)
     baseline_cpu_model = Column(String, nullable=True)
     baseline_gpu_model = Column(String, nullable=True)
 
@@ -53,13 +58,22 @@ class Job(Base):
     optimized_duration_s = Column(Float, nullable=True)
     optimized_cpu_energy = Column(Float, nullable=True)
     optimized_gpu_energy = Column(Float, nullable=True)
-    optimized_water_l = Column(Float, nullable=True)
 
     # Savings
     emissions_saved_kg = Column(Float, nullable=True)
     emissions_saved_pct = Column(Float, nullable=True)
     energy_saved_kwh = Column(Float, nullable=True)
     energy_saved_pct = Column(Float, nullable=True)
+
+    # Comparison metrics
+    country_code = Column(String, nullable=True)
+    carbon_intensity_gco2_kwh = Column(Float, nullable=True)
+    tree_months = Column(Float, nullable=True)
+    car_km = Column(Float, nullable=True)
+    smartphone_charges = Column(Float, nullable=True)
+    streaming_hours = Column(Float, nullable=True)
+    flight_fraction = Column(Float, nullable=True)
+    led_bulb_hours = Column(Float, nullable=True)
 
     # Error / metadata
     error_message = Column(Text, nullable=True)

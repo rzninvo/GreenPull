@@ -3,11 +3,42 @@
 Analyze ML repositories for carbon emissions and suggest energy-saving optimizations.
 
 Give it a GitHub repo URL with ML training code. It will:
-1. Clone the repo and detect the training entrypoint (regex + GPT)
-2. Run the training with CodeCarbon to measure baseline emissions
-3. Apply an optimization patch (AMP mixed precision or LoRA)
-4. Re-run and measure the optimized emissions
-5. Report before/after savings (CO2, kWh, water)
+
+1. Clone the repo and detect the training entrypoint (regex heuristics + GPT)
+2. Extract training configuration (model architecture, params, epochs, hardware) via GPT analysis of source code, config files, and imported modules
+3. Estimate baseline carbon emissions using [Green Algorithms](https://www.green-algorithms.org/) formulas
+4. Generate an optimization patch (AMP mixed precision and/or LoRA)
+5. Estimate optimized emissions with the patch applied
+6. Report savings with real-world comparisons (tree-months, car km, smartphone charges, etc.)
+
+No code is executed. All estimation is done via static analysis + Green Algorithms formulas.
+
+## How It Works
+
+```text
+Clone repo
+    |
+    v
+Detect training entrypoint (regex scoring + iterative GPT analysis)
+    |
+    v
+Gather context (config files, imported modules, README, dependencies)
+    |
+    v
+GPT extracts training config (model type, parameter count, epochs, GPU needs, runtime estimate)
+    |
+    v
+Estimate baseline emissions (Green Algorithms: power = PUE * (CPU + GPU + memory), energy = power * hours, carbon = energy * country_CI)
+    |
+    v
+GPT generates AMP/LoRA patch (preview only, original code unchanged)
+    |
+    v
+GPT estimates optimized runtime/memory
+    |
+    v
+Estimate optimized emissions -> compute savings + comparisons
+```
 
 ## Quick Start
 
@@ -19,16 +50,20 @@ Give it a GitHub repo URL with ML training code. It will:
 ### 2. Install
 
 ```bash
+conda create -n greenpull python=3.11 -y
+conda activate greenpull
 cd backend
 pip install -r requirements.txt
 ```
 
 ### 3. Configure
 
-Edit `backend/.env` and set your OpenAI API key:
+Create `backend/.env`:
 
-```
+```env
 OPENAI_API_KEY=sk-your-key-here
+OPENAI_MODEL=gpt-4o
+DEBUG=true
 ```
 
 ### 4. Run
@@ -40,32 +75,25 @@ cd backend
 bash run.sh
 ```
 
-Or start each piece manually:
+Or manually:
 
 ```bash
 # Terminal 1: Redis
 redis-server
 
-# Terminal 2: RQ worker (processes jobs)
-cd backend
-PYTHONPATH=. rq worker --url redis://localhost:6379/0
+# Terminal 2: RQ worker
+cd backend && PYTHONPATH=. rq worker --url redis://localhost:6379/0
 
-# Terminal 3: FastAPI server
-cd backend
-PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# Terminal 3: FastAPI
+cd backend && PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 5. Submit a repo for analysis
+### 5. Submit a repo
 
 ```bash
 curl -X POST http://localhost:8000/api/analyze \
   -H "Content-Type: application/json" \
-  -d '{"repo_url": "https://github.com/username/ml-repo", "patch_type": "amp"}'
-```
-
-Response:
-```json
-{"job_id": "abc-123", "status": "queued", "message": "Job queued. Poll GET /api/jobs/{job_id} for status."}
+  -d '{"repo_url": "https://github.com/user/ml-repo", "patch_type": "amp", "country_iso_code": "DEU"}'
 ```
 
 ### 6. Poll for results
@@ -74,30 +102,16 @@ Response:
 curl http://localhost:8000/api/jobs/<job_id>
 ```
 
-The response progressively fills in as the pipeline runs:
-- `status: "cloning"` -> `"analyzing"` -> `"running_baseline"` -> `"patching"` -> `"running_optimized"` -> `"completed"`
-- `detection` — which file was detected, what command, what framework
-- `baseline` — emissions, energy, duration, hardware info
-- `optimized` — same fields after the patch
-- `savings` — how much CO2/energy was saved (absolute + percentage)
-- `patch_diff` — the unified diff of what was changed
+Status progression: `queued` -> `cloning` -> `analyzing` -> `extracting_config` -> `estimating_baseline` -> `patching` -> `estimating_optimized` -> `completed`
 
-## Debug Mode
+Response includes:
 
-Debug mode is on by default (`DEBUG=true` in `.env`). The RQ worker terminal will print detailed logs for every step:
-
-```
-12:34:56 INFO     [Pipeline] STEP 2: Detecting training entrypoint
-12:34:56 INFO     [Scan] Scanned 23 .py files, found 3 candidates:
-12:34:56 INFO       train.py                                  score= 180  patterns=['training_filename', 'backward', 'optimizer_step', ...]
-12:34:56 INFO       utils/trainer.py                          score=  85  patterns=['trainer_call', 'model_train']
-12:34:57 INFO     [Detect] Analyzing script 1/3: train.py (score=180)
-12:34:58 INFO     [Detect] GPT response for train.py:
-                   {"summary": "Main training loop for ResNet...", "is_main_entrypoint": "yes", "confidence": "high", ...}
-12:34:58 INFO     [Detect] HIGH CONFIDENCE MATCH: train.py
-```
-
-Set `DEBUG=false` in `.env` to reduce log verbosity.
+- `detection` -- entrypoint file, framework, run command
+- `training_config` -- model type, parameter count, epochs, batch size, GPU type, estimated runtime
+- `baseline` / `optimized` -- emissions (kg CO2), energy (kWh), duration, CPU/GPU energy breakdown
+- `savings` -- absolute and percentage reductions
+- `comparisons` -- tree-months, car km, smartphone charges, streaming hours, flight fraction, LED bulb hours
+- `patch_diff` -- unified diff of the optimization patch
 
 ## API Endpoints
 
@@ -108,25 +122,40 @@ Set `DEBUG=false` in `.env` to reduce log verbosity.
 | GET | `/api/jobs` | List recent jobs |
 | GET | `/api/health` | Health check |
 
-### POST /api/analyze body
+### POST /api/analyze
 
 ```json
 {
   "repo_url": "https://github.com/user/repo",
   "patch_type": "amp",
-  "country_iso_code": "USA",
-  "max_training_seconds": 300
+  "country_iso_code": "DEU"
 }
 ```
 
 - `patch_type`: `"amp"` (mixed precision), `"lora"` (LoRA), or `"both"`
-- `country_iso_code`: 3-letter ISO code for carbon intensity lookup
-- `max_training_seconds`: timeout for each training run (default 300)
+- `country_iso_code`: ISO 3166-1 alpha-3 code for carbon intensity (default: `"DEU"`)
+
+Supported countries include all EU members + USA, CAN, BRA, CHN, IND, JPN, KOR, AUS, and more. Falls back to world average if unknown.
+
+## Estimation Method
+
+Based on [Green Algorithms](https://www.green-algorithms.org/) (Lannelongue et al., 2021):
+
+```text
+power (W)  = PUE * (CPU_cores * TDP/core * usage + GPUs * GPU_TDP * usage + memory_GB * 0.375)
+energy (kWh) = power * runtime_hours / 1000
+carbon (g CO2) = energy * carbon_intensity(country)
+```
+
+- GPU TDP data for 25+ GPUs (H100, A100, V100, T4, RTX series, etc.)
+- CPU TDP for 10 classes (Xeon, EPYC, Ryzen, desktop, cloud)
+- Carbon intensity for 30+ countries from CodeCarbon/IEA data
+- PUE: 1.0 (local) or 1.2 (cloud)
 
 ## Stack
 
 - **API**: FastAPI + SQLite + SQLAlchemy
 - **Queue**: Redis + RQ
-- **Detection**: Regex heuristics + OpenAI GPT
-- **Measurement**: CodeCarbon (OfflineEmissionsTracker)
-- **Patching**: GPT-generated AMP/LoRA code transformations
+- **Detection**: Regex heuristics + OpenAI GPT (iterative analysis)
+- **Estimation**: Green Algorithms formulas
+- **Patching**: GPT-generated AMP/LoRA code transformations (preview only)

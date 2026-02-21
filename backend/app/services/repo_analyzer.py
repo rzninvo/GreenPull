@@ -76,12 +76,25 @@ class RepoAnalyzer:
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.clone_dir = settings.CLONE_DIR
 
+    @staticmethod
+    def _normalize_github_url(url: str) -> str:
+        """Convert browser GitHub URLs to clone-able URLs.
+        e.g. https://github.com/user/repo/tree/main -> https://github.com/user/repo
+        """
+        url = url.rstrip("/")
+        # Strip /tree/... or /blob/... suffixes
+        url = re.sub(r"/(tree|blob)/[^/]+.*$", "", url)
+        # Ensure .git suffix works too
+        return url
+
     def clone_repo(self, repo_url: str, job_id: str) -> Path:
         dest = self.clone_dir / job_id
         if dest.exists():
             shutil.rmtree(dest)
-        logger.info(f"[Clone] Cloning {repo_url} -> {dest}")
-        git.Repo.clone_from(repo_url, str(dest), depth=1)
+        clone_url = self._normalize_github_url(repo_url)
+        logger.info(f"[Clone] URL normalized: {repo_url} -> {clone_url}")
+        logger.info(f"[Clone] Cloning into {dest}")
+        git.Repo.clone_from(clone_url, str(dest), depth=1)
         logger.info(f"[Clone] Done")
         return dest
 
@@ -209,7 +222,7 @@ IMPORTANT: If this is the main training script, set run_command to the minimal c
             response = self.client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=512,
+                max_completion_tokens=512,
                 temperature=0,
             )
 
@@ -295,7 +308,7 @@ Respond with ONLY valid JSON:
         response = self.client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=512,
+            max_completion_tokens=512,
             temperature=0,
         )
 
@@ -315,7 +328,295 @@ Respond with ONLY valid JSON:
             confidence="medium",
         )
 
-    # ---- Helpers ----
+    # ---- Training config extraction ----
+
+    def extract_training_config(
+        self, code: str, entrypoint_file: str, framework: str,
+        dep_context: str, config_context: str = "",
+        imports_context: str = "", readme_context: str = "",
+    ) -> dict:
+        """Ask GPT to extract training configuration from source code + repo context."""
+        lines = code.splitlines()
+        if len(lines) > 600:
+            code = "\n".join(lines[:600]) + "\n# ... (truncated)"
+
+        # Build optional context sections
+        extra_sections = ""
+        if config_context:
+            extra_sections += f"\nCONFIG FILES FOUND IN REPO:\n{config_context}\n"
+        if imports_context:
+            extra_sections += f"\nLOCAL MODULES IMPORTED BY ENTRYPOINT:\n{imports_context}\n"
+        if readme_context:
+            extra_sections += f"\nREADME:\n{readme_context}\n"
+
+        prompt = f"""You are an expert ML engineer analyzing a training script to estimate its computational requirements.
+
+DEPENDENCY CONTEXT:
+{dep_context}
+{extra_sections}
+FRAMEWORK: {framework}
+FILE: {entrypoint_file}
+
+SOURCE CODE:
+```python
+{code}
+```
+
+Analyze this training script AND all the context above (config files, imported modules, README) to extract/estimate the following. Use config files for exact values when available. For values not found anywhere, make reasonable estimates.
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+{{
+  "model_type": "transformer" | "cnn" | "mlp" | "rnn" | "gnn" | "diffusion" | "gan" | "other",
+  "model_name": "e.g. bert-base-uncased, resnet50, gpt2" or null,
+  "parameter_count_millions": <float>,
+  "epochs": <int>,
+  "batch_size": <int>,
+  "dataset_size_estimate": "small (<10K samples)" | "medium (10K-1M)" | "large (>1M)",
+  "estimated_runtime_hours": <float, wall-clock time for full training>,
+  "gpu_required": <bool>,
+  "gpu_type": "A100" | "V100" | "T4" | "RTX_3090" | "H100" | etc.,
+  "num_gpus": <int>,
+  "cpu_type": "server_generic" | "cloud_generic" | "desktop_generic",
+  "num_cpu_cores": <int>,
+  "memory_gb": <float>,
+  "reasoning": "2-3 sentences explaining your estimates"
+}}
+
+GUIDELINES:
+- HuggingFace Trainer + BERT-base (110M), 3 epochs medium dataset: ~0.5-2h on V100
+- PyTorch CNN ResNet50 (25M), 10 epochs ImageNet: ~10-20h on V100
+- sklearn: minutes, CPU only
+- Fine-tuning >1B params: hours on A100
+- Use epochs/batch_size from code args if present"""
+
+        logger.info(f"[Config] Extracting training config from {entrypoint_file}")
+
+        response = self.client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=1024,
+            temperature=0,
+        )
+
+        raw = response.choices[0].message.content
+        logger.info(f"[Config] GPT response:\n{raw}")
+
+        result = self._parse_gpt_json(raw)
+        if result is None:
+            logger.error("[Config] Failed to parse, using defaults")
+            return {
+                "model_type": "unknown", "model_name": None,
+                "parameter_count_millions": 100.0, "epochs": 3,
+                "batch_size": 32, "dataset_size_estimate": "medium (10K-1M)",
+                "estimated_runtime_hours": 1.0, "gpu_required": True,
+                "gpu_type": "V100", "num_gpus": 1,
+                "cpu_type": "server_generic", "num_cpu_cores": 8,
+                "memory_gb": 16.0, "reasoning": "Defaults (GPT parse failed).",
+            }
+        return result
+
+    def estimate_optimized_config(
+        self, baseline_config: dict, patch_type: str, patch_diff: str,
+        original_code: str, patched_code: str,
+    ) -> dict:
+        """Ask GPT how the optimization patch changes runtime/power."""
+        prompt = f"""You are an expert ML engineer estimating how an optimization patch affects training.
+
+BASELINE CONFIG:
+{json.dumps(baseline_config, indent=2)}
+
+PATCH TYPE: {patch_type}
+
+PATCH DIFF:
+```diff
+{patch_diff[:3000]}
+```
+
+OPTIMIZED CODE (first 400 lines):
+```python
+{chr(10).join(patched_code.splitlines()[:400])}
+```
+
+AMP: 15-40% runtime reduction on GPU (Ampere+ GPUs more). No benefit CPU-only.
+LoRA: 90-99% fewer trainable params, 20-40% faster. Only for attention-based models.
+BOTH: 35-60% combined speedup.
+
+Respond with ONLY valid JSON:
+{{
+  "estimated_runtime_hours": <float>,
+  "runtime_reduction_pct": <float>,
+  "memory_gb": <float>,
+  "batch_size": <int>,
+  "parameter_count_millions": <float, trainable params after optimization>,
+  "reasoning": "2-3 sentences"
+}}"""
+
+        logger.info(f"[OptConfig] Estimating optimized config for {patch_type}")
+
+        response = self.client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=512,
+            temperature=0,
+        )
+
+        raw = response.choices[0].message.content
+        logger.info(f"[OptConfig] GPT response:\n{raw}")
+
+        result = self._parse_gpt_json(raw)
+        if result is None:
+            logger.warning("[OptConfig] Failed to parse, using 20% default reduction")
+            return {
+                "estimated_runtime_hours": baseline_config.get("estimated_runtime_hours", 1.0) * 0.8,
+                "runtime_reduction_pct": 20.0,
+                "memory_gb": baseline_config.get("memory_gb", 16.0) * 0.8,
+                "batch_size": baseline_config.get("batch_size", 32),
+                "parameter_count_millions": baseline_config.get("parameter_count_millions", 100.0),
+                "reasoning": "Defaults (GPT parse failed). Assuming 20% improvement.",
+            }
+        return result
+
+    # ---- Context gathering helpers ----
+
+    def _gather_config_files(self, repo_path: Path) -> str:
+        """Find and read config files (YAML, JSON, TOML, CFG, INI) in the repo."""
+        config_extensions = {".yaml", ".yml", ".json", ".toml", ".cfg", ".ini", ".conf"}
+        # Also match common config filenames without extension
+        config_names = {"config", "hparams", "hyperparameters", "params", "settings"}
+        found = []
+        total_chars = 0
+        max_total = 6000  # cap total config context
+
+        for fpath in sorted(repo_path.rglob("*")):
+            if not fpath.is_file():
+                continue
+            # Skip hidden dirs and common junk
+            parts = fpath.relative_to(repo_path).parts
+            if any(p.startswith(".") or p in SKIP_DIRS for p in parts):
+                continue
+            # Skip package metadata and non-ML config files
+            skip_names = {
+                "requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+                "package.json", "package-lock.json", "tsconfig.json",
+                "babel.config.json", ".eslintrc.json", ".prettierrc.json",
+                "Cargo.toml", "Cargo.lock", "composer.json",
+            }
+            if fpath.name in skip_names:
+                continue
+
+            stem_lower = fpath.stem.lower()
+            ext = fpath.suffix.lower()
+
+            is_config = (
+                ext in config_extensions
+                or any(cn in stem_lower for cn in config_names)
+            )
+            if not is_config:
+                continue
+            # Skip large files (likely data, not config)
+            try:
+                size = fpath.stat().st_size
+                if size > 50_000:
+                    continue
+            except OSError:
+                continue
+
+            try:
+                content = fpath.read_text(errors="ignore")[:2000]
+            except Exception:
+                continue
+
+            rel = str(fpath.relative_to(repo_path))
+            entry = f"--- {rel} ---\n{content}"
+            if total_chars + len(entry) > max_total:
+                break
+            found.append(entry)
+            total_chars += len(entry)
+
+        return "\n".join(found) if found else ""
+
+    def _resolve_local_imports(self, repo_path: Path, entrypoint_file: str) -> str:
+        """Parse the entrypoint's imports and read locally-defined modules."""
+        import ast
+
+        entrypoint_path = repo_path / entrypoint_file
+        try:
+            source = entrypoint_path.read_text(errors="ignore")
+            tree = ast.parse(source)
+        except Exception:
+            return ""
+
+        local_modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local_modules.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    local_modules.add(node.module.split(".")[0])
+
+        # Check which imports correspond to local files/dirs in the repo
+        found = []
+        total_chars = 0
+        max_total = 8000
+
+        for mod_name in sorted(local_modules):
+            # Try mod_name.py or mod_name/__init__.py
+            candidates = [
+                repo_path / f"{mod_name}.py",
+                repo_path / mod_name / "__init__.py",
+                repo_path / mod_name / "model.py",
+                repo_path / mod_name / "models.py",
+                repo_path / mod_name / "network.py",
+                repo_path / mod_name / "net.py",
+                repo_path / mod_name / "config.py",
+            ]
+            # Also check relative to entrypoint's directory
+            ep_dir = entrypoint_path.parent
+            if ep_dir != repo_path:
+                candidates.extend([
+                    ep_dir / f"{mod_name}.py",
+                    ep_dir / mod_name / "__init__.py",
+                    ep_dir / mod_name / "model.py",
+                    ep_dir / mod_name / "models.py",
+                ])
+
+            for cand in candidates:
+                if cand.exists() and cand.is_file():
+                    try:
+                        content = cand.read_text(errors="ignore")
+                        lines = content.splitlines()
+                        if len(lines) > 200:
+                            content = "\n".join(lines[:200]) + "\n# ... (truncated)"
+                    except Exception:
+                        continue
+
+                    rel = str(cand.relative_to(repo_path))
+                    # Skip the entrypoint itself
+                    if rel == entrypoint_file:
+                        continue
+                    entry = f"--- {rel} ---\n{content}"
+                    if total_chars + len(entry) > max_total:
+                        break
+                    found.append(entry)
+                    total_chars += len(entry)
+                    break  # found this module, move on
+
+        return "\n".join(found) if found else ""
+
+    def _get_readme_context(self, repo_path: Path) -> str:
+        """Read the README for model/dataset description."""
+        for name in ("README.md", "readme.md", "README.rst", "README.txt", "README"):
+            readme = repo_path / name
+            if readme.exists():
+                try:
+                    content = readme.read_text(errors="ignore")
+                    if len(content) > 3000:
+                        content = content[:3000] + "\n... (truncated)"
+                    return content
+                except Exception:
+                    pass
+        return ""
 
     def _get_dependency_context(self, repo_path: Path) -> str:
         context_parts = []

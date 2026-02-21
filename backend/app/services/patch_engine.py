@@ -23,7 +23,7 @@ class PatchEngine:
         patch_type: str,
     ) -> Tuple[str, str]:
         file_path = repo_path / entrypoint_file
-        original_code = file_path.read_text()
+        original_code = file_path.read_text(errors="ignore")
 
         logger.info(f"[Patch] Applying '{patch_type}' patch to {entrypoint_file} (framework={framework})")
         logger.info(f"[Patch] Original code: {len(original_code)} chars, "
@@ -47,8 +47,7 @@ class PatchEngine:
         logger.info(f"[Patch] Patched code: {len(patched_code)} chars, "
                      f"{len(patched_code.splitlines())} lines")
 
-        file_path.write_text(patched_code)
-
+        # Don't write patched code to disk — preview only
         diff = "".join(difflib.unified_diff(
             original_code.splitlines(keepends=True),
             patched_code.splitlines(keepends=True),
@@ -125,7 +124,7 @@ RULES:
         response = self.client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096,
+            max_completion_tokens=4096,
             temperature=0,
         )
         text = response.choices[0].message.content or ""

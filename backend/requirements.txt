@@ -7,5 +7,3 @@ rq>=1.16
 redis>=5.0
 openai>=1.0
 gitpython>=3.1
-psutil>=5.9
-codecarbon>=2.3.0

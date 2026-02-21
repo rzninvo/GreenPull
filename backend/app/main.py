@@ -13,7 +13,6 @@ from app.core.database import init_db
 async def lifespan(app: FastAPI):
     init_db()
     os.makedirs(settings.CLONE_DIR, exist_ok=True)
-    os.makedirs(settings.RESULTS_DIR, exist_ok=True)
     yield
 
 

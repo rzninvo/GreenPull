@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 venv/
 codecarbon/
+.vscode
+green-algorithms-tool/
+.DS_Store
