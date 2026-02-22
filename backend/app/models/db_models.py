@@ -51,6 +51,7 @@ class Job(Base):
     # Patch info
     patch_type = Column(String, nullable=True)
     patch_diff = Column(Text, nullable=True)
+    patched_code = Column(Text, nullable=True)
 
     # Optimized results
     optimized_emissions_kg = Column(Float, nullable=True)

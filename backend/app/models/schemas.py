@@ -64,6 +64,19 @@ class ComparisonMetricsResponse(BaseModel):
     led_bulb_hours: Optional[float] = None
 
 
+class CreatePRRequest(BaseModel):
+    github_token: str
+    title: str = ""
+    body: str = ""
+    branch_name: str = "greenpull/optimization"
+    base_branch: str = "main"
+
+
+class CreatePRResponse(BaseModel):
+    pr_number: int
+    pr_url: str
+
+
 class JobStatusResponse(BaseModel):
     job_id: str
     repo_url: str

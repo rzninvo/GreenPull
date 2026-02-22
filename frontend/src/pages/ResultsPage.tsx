@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { mockMetrics, regionData, greenWindow } from "@/data/mockData";
 import CodeDiff from "@/components/CodeDiff";
+import CreatePRModal from "@/components/CreatePRModal";
 import { parseUnifiedDiff, type JobResponse } from "@/api/client";
 import {
   Leaf, GitPullRequest, Cloud, Zap, Droplets, Gauge, MapPin, Clock, ArrowRight,
@@ -32,6 +34,7 @@ const ResultsPage = () => {
   const location = useLocation();
   const state = location.state as { job?: JobResponse; repoUrl?: string } | null;
   const job = state?.job;
+  const [prModalOpen, setPrModalOpen] = useState(false);
 
   if (!job) {
     return (
@@ -129,13 +132,18 @@ const ResultsPage = () => {
               <ArrowRight className="h-4 w-4 rotate-180" />
               New Analysis
             </Button>
-            <Button className="bg-green-600 hover:bg-green-700 text-white gap-2">
+            <Button
+              onClick={() => setPrModalOpen(true)}
+              className="bg-green-600 hover:bg-green-700 text-white gap-2"
+            >
               <GitPullRequest className="h-4 w-4" />
               Create Pull Request
             </Button>
           </div>
         </div>
       </header>
+
+      <CreatePRModal open={prModalOpen} onOpenChange={setPrModalOpen} job={job} />
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-10">
         {/* Training config summary */}

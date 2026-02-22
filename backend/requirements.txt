@@ -7,3 +7,5 @@ rq>=1.16
 redis>=5.0
 openai>=1.0
 gitpython>=3.1
+google-genai>=1.0
+PyGithub>=2.0

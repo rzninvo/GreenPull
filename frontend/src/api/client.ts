@@ -112,6 +112,37 @@ export async function getJobStatus(jobId: string): Promise<JobResponse> {
   return res.json();
 }
 
+// --- Pull Request ---
+
+export interface CreatePRRequest {
+  github_token: string;
+  title: string;
+  body: string;
+  branch_name: string;
+  base_branch: string;
+}
+
+export interface CreatePRResponse {
+  pr_number: number;
+  pr_url: string;
+}
+
+export async function createPullRequest(
+  jobId: string,
+  req: CreatePRRequest
+): Promise<CreatePRResponse> {
+  const res = await fetch(`/api/jobs/${jobId}/create-pr`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `API error ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Unified diff parser ---
 
 export function parseUnifiedDiff(

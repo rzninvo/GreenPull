@@ -168,8 +168,12 @@ def run_pipeline(
             entrypoint_file=detection.entrypoint_file,
             framework=detection.framework or "unknown",
             patch_type=patch_type,
+            dep_context=dep_context,
+            config_context=config_context,
+            imports_context=imports_context,
+            readme_context=readme_context,
         )
-        _update_job(db, job_id, patch_type=patch_type, patch_diff=diff)
+        _update_job(db, job_id, patch_type=patch_type, patch_diff=diff, patched_code=patched_code)
 
         # --- 6. Estimate optimized emissions ---
         logger.info("[Pipeline] STEP 6: Estimating OPTIMIZED emissions")
