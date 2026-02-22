@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { BarChart3, Cpu, Leaf, Loader2 } from "lucide-react";
 import { submitAnalysis } from "@/api/client";
+import InfoButton from "@/components/inform_buttons/InfoButton";
 
 const COUNTRIES = [
   { code: "DEU", label: "Germany" },
@@ -29,18 +30,18 @@ const COUNTRIES = [
 const features = [
   {
     icon: BarChart3,
-    title: "Estimate",
-    description: "Analyze your ML training code and estimate CO₂ emissions using Green Algorithms formulas — no code execution needed.",
+    title: "Measure",
+    description: "Run CodeCarbon baseline on your repository to measure exact CO₂ emissions, energy use, and water consumption.",
   },
   {
     icon: Cpu,
     title: "Optimize",
-    description: "AI generates AMP mixed precision and LoRA patches to reduce energy consumption and training time.",
+    description: "AI scans your code for opportunities like mixed precision, LoRA, INT8 quantization, and efficient scheduling.",
   },
   {
     icon: Leaf,
     title: "Save",
-    description: "See before/after emissions, energy savings, and real-world comparisons like tree-months and car km avoided.",
+    description: "Get a ready-to-merge pull request with optimized code and a full sustainability impact report.",
   },
 ];
 
@@ -72,6 +73,7 @@ const LandingPage = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
+      <InfoButton />
       <main className="flex-1 flex flex-col items-center justify-center px-4 py-20">
         <div className="max-w-3xl w-full text-center space-y-6 animate-fade-in">
           <div className="flex items-center justify-center gap-2 mb-2">
