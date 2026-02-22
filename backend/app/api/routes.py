@@ -10,14 +10,19 @@ from app.core.database import get_db
 from app.models.db_models import Job, JobStatus
 from app.models.schemas import (
     AnalyzeRequest,
+    CarbonIntensityInfo,
     ComparisonMetricsResponse,
     CreatePRRequest,
     CreatePRResponse,
     DetectionResult,
     EmissionsDetail,
+    GreenWindowResponse,
     JobCreatedResponse,
     JobStatusResponse,
+    PatchedFileInfo,
+    RegionRecommendationResponse,
     TrainingConfigResponse,
+    WaterUsageResponse,
 )
 from app.services.github_service import GitHubService
 
@@ -126,6 +131,67 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
             led_bulb_hours=job.led_bulb_hours,
         )
 
+    # Carbon intensity info
+    carbon_intensity_info = None
+    if job.carbon_intensity_gco2_kwh is not None:
+        carbon_intensity_info = CarbonIntensityInfo(
+            value=job.carbon_intensity_gco2_kwh,
+            zone=job.carbon_intensity_zone,
+            source=job.carbon_intensity_source,
+            datetime_utc=job.carbon_intensity_datetime,
+        )
+
+    # Green window
+    green_window = None
+    if job.green_window_start is not None:
+        green_window = GreenWindowResponse(
+            best_window_start=job.green_window_start,
+            best_window_end=job.green_window_end,
+            best_intensity=job.green_window_intensity,
+            current_intensity=job.current_grid_intensity,
+            savings_pct=job.green_window_savings_pct,
+        )
+
+    # Region recommendation
+    region_recommendation = None
+    if job.recommended_region_code is not None:
+        region_recommendation = RegionRecommendationResponse(
+            current_zone=job.carbon_intensity_zone,
+            current_intensity=job.carbon_intensity_gco2_kwh,
+            recommended_provider=job.recommended_region_provider,
+            recommended_region_code=job.recommended_region_code,
+            recommended_region_name=job.recommended_region_name,
+            recommended_country=job.recommended_region_country,
+            recommended_city=job.recommended_region_city,
+            recommended_intensity=job.recommended_region_intensity,
+            savings_pct=job.region_savings_pct,
+        )
+
+    # Water usage
+    water_usage = None
+    if job.water_liters_baseline is not None:
+        water_usage = WaterUsageResponse(
+            baseline_liters=job.water_liters_baseline,
+            optimized_liters=job.water_liters_optimized,
+            wue=job.water_wue,
+        )
+
+    # Patched files info
+    patched_files = None
+    if job.patched_files_json:
+        try:
+            pf_data = json.loads(job.patched_files_json)
+            patched_files = [
+                PatchedFileInfo(
+                    file_path=pf["file_path"],
+                    role=pf["role"],
+                    optimization=pf["optimization"],
+                )
+                for pf in pf_data
+            ]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     return JobStatusResponse(
         job_id=job.id,
         repo_url=job.repo_url,
@@ -140,6 +206,11 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
         patch_diff=job.patch_diff,
         savings=savings,
         comparisons=comparisons,
+        carbon_intensity_info=carbon_intensity_info,
+        green_window=green_window,
+        region_recommendation=region_recommendation,
+        water_usage=water_usage,
+        patched_files=patched_files,
         error_message=job.error_message,
     )
 
@@ -179,9 +250,28 @@ def create_pull_request(job_id: str, req: CreatePRRequest, db: Session = Depends
 
     title = req.title or f"GreenPull: Add {patch_label} to {job.entrypoint_file}"
 
+    # Parse multi-file data if available
+    file_patches = None
+    if job.patched_files_json:
+        try:
+            file_patches = json.loads(job.patched_files_json)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     if not req.body:
         body_parts = [f"## GreenPull Optimization\n"]
-        body_parts.append(f"**File:** `{job.entrypoint_file}`")
+        if file_patches and len(file_patches) > 1:
+            body_parts.append(f"**Files modified:** {len(file_patches)}")
+            opt_labels = {
+                "amp": "AMP", "lora": "LoRA", "amp+lora": "AMP+LoRA",
+                "dataloader_opts": "DataLoader Optimization",
+                "config_update": "Config Update",
+            }
+            for pf in file_patches:
+                ol = opt_labels.get(pf["optimization"], pf["optimization"])
+                body_parts.append(f"- `{pf['file_path']}` — {ol}")
+        else:
+            body_parts.append(f"**File:** `{job.entrypoint_file}`")
         body_parts.append(f"**Technique:** {patch_label}\n")
         if job.emissions_saved_kg is not None:
             body_parts.append(f"### Estimated Savings")
@@ -194,14 +284,26 @@ def create_pull_request(job_id: str, req: CreatePRRequest, db: Session = Depends
 
     try:
         gh = GitHubService(token=req.github_token, repo_url=job.repo_url)
-        result = gh.create_optimization_pr(
-            file_path=job.entrypoint_file,
-            patched_code=job.patched_code,
-            title=title,
-            body=body,
-            branch_name=req.branch_name,
-            base_branch=req.base_branch,
-        )
+        if file_patches and len(file_patches) > 1:
+            result = gh.create_multi_file_optimization_pr(
+                file_patches=[
+                    {"file_path": pf["file_path"], "patched_code": pf["patched_code"]}
+                    for pf in file_patches
+                ],
+                title=title,
+                body=body,
+                branch_name=req.branch_name,
+                base_branch=req.base_branch,
+            )
+        else:
+            result = gh.create_optimization_pr(
+                file_path=job.entrypoint_file,
+                patched_code=job.patched_code,
+                title=title,
+                body=body,
+                branch_name=req.branch_name,
+                base_branch=req.base_branch,
+            )
         return CreatePRResponse(pr_number=result["number"], pr_url=result["url"])
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -63,6 +63,45 @@ export interface Savings {
   energy_saved_pct: number;
 }
 
+export interface CarbonIntensityInfo {
+  value: number | null;
+  zone: string | null;
+  source: string | null;
+  datetime_utc: string | null;
+}
+
+export interface GreenWindowData {
+  best_window_start: string | null;
+  best_window_end: string | null;
+  best_intensity: number | null;
+  current_intensity: number | null;
+  savings_pct: number | null;
+}
+
+export interface RegionRecommendation {
+  current_zone: string | null;
+  current_intensity: number | null;
+  recommended_provider: string | null;
+  recommended_region_code: string | null;
+  recommended_region_name: string | null;
+  recommended_country: string | null;
+  recommended_city: string | null;
+  recommended_intensity: number | null;
+  savings_pct: number | null;
+}
+
+export interface WaterUsage {
+  baseline_liters: number | null;
+  optimized_liters: number | null;
+  wue: number | null;
+}
+
+export interface PatchedFileInfo {
+  file_path: string;
+  role: string;
+  optimization: string;
+}
+
 export interface JobResponse {
   job_id: string;
   repo_url: string;
@@ -77,6 +116,11 @@ export interface JobResponse {
   patch_diff: string | null;
   savings: Savings | null;
   comparisons: Comparisons | null;
+  carbon_intensity_info: CarbonIntensityInfo | null;
+  green_window: GreenWindowData | null;
+  region_recommendation: RegionRecommendation | null;
+  water_usage: WaterUsage | null;
+  patched_files: PatchedFileInfo[] | null;
   error_message: string | null;
 }
 
@@ -217,4 +261,61 @@ export function parseUnifiedDiff(
     co2Savings: "",
     lines: diffLines,
   };
+}
+
+// --- Multi-file diff parser ---
+
+const OPT_LABELS: Record<string, string> = {
+  amp: "Mixed Precision (AMP)",
+  lora: "LoRA Fine-Tuning",
+  "amp+lora": "AMP + LoRA",
+  both: "AMP + LoRA",
+  dataloader_opts: "DataLoader Optimization",
+  config_update: "Config Update",
+};
+
+export function parseMultiFileDiff(
+  combinedDiff: string,
+  patchType: string,
+  patchedFiles?: PatchedFileInfo[]
+): FileDiff[] {
+  if (!combinedDiff || !combinedDiff.trim()) return [];
+
+  // Split into file sections by "--- a/" boundaries
+  const fileSections: Array<{ path: string; diffText: string }> = [];
+  const lines = combinedDiff.split("\n");
+
+  let currentPath: string | null = null;
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    const fromMatch = line.match(/^--- a\/(.+)$/);
+    if (fromMatch) {
+      if (currentPath !== null) {
+        fileSections.push({ path: currentPath, diffText: currentLines.join("\n") });
+      }
+      currentPath = fromMatch[1];
+      currentLines = [line];
+      continue;
+    }
+    if (currentPath !== null) {
+      currentLines.push(line);
+    }
+  }
+  if (currentPath !== null) {
+    fileSections.push({ path: currentPath, diffText: currentLines.join("\n") });
+  }
+
+  // Fallback: no git-style headers (legacy single-file diff)
+  if (fileSections.length === 0) {
+    return [parseUnifiedDiff(combinedDiff, "unknown", patchType)];
+  }
+
+  return fileSections.map(({ path, diffText }) => {
+    const fileInfo = patchedFiles?.find((pf) => pf.file_path === path);
+    const optimization = fileInfo?.optimization || patchType;
+    const fileDiff = parseUnifiedDiff(diffText, path, patchType);
+    fileDiff.optimization = OPT_LABELS[optimization] || OPT_LABELS[patchType] || optimization;
+    return fileDiff;
+  });
 }

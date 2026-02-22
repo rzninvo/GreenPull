@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     GITHUB_TOKEN: str = ""
 
+    ELECTRICITYMAPS_API_TOKEN: str = ""
+    ELECTRICITYMAPS_BASE_URL: str = "https://api.electricitymaps.com/v3"
+    DEFAULT_WUE: float = 1.8  # Water Usage Effectiveness (L/kWh), industry average
+
     DEBUG: bool = True
 
     class Config:

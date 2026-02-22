@@ -50,8 +50,9 @@ class Job(Base):
 
     # Patch info
     patch_type = Column(String, nullable=True)
-    patch_diff = Column(Text, nullable=True)
-    patched_code = Column(Text, nullable=True)
+    patch_diff = Column(Text, nullable=True)       # Combined multi-file unified diff
+    patched_code = Column(Text, nullable=True)     # Entrypoint patched code (backward compat)
+    patched_files_json = Column(Text, nullable=True)  # JSON: [{file_path, role, optimization, patched_code}]
 
     # Optimized results
     optimized_emissions_kg = Column(Float, nullable=True)
@@ -75,6 +76,32 @@ class Job(Base):
     streaming_hours = Column(Float, nullable=True)
     flight_fraction = Column(Float, nullable=True)
     led_bulb_hours = Column(Float, nullable=True)
+
+    # Electricity Maps metadata
+    carbon_intensity_source = Column(String, nullable=True)  # "api" or "static_fallback"
+    carbon_intensity_zone = Column(String, nullable=True)
+    carbon_intensity_datetime = Column(String, nullable=True)
+
+    # Green window (forecast)
+    green_window_start = Column(String, nullable=True)
+    green_window_end = Column(String, nullable=True)
+    green_window_intensity = Column(Float, nullable=True)
+    current_grid_intensity = Column(Float, nullable=True)
+    green_window_savings_pct = Column(Float, nullable=True)
+
+    # Region recommendation
+    recommended_region_provider = Column(String, nullable=True)
+    recommended_region_code = Column(String, nullable=True)
+    recommended_region_name = Column(String, nullable=True)
+    recommended_region_country = Column(String, nullable=True)
+    recommended_region_city = Column(String, nullable=True)
+    recommended_region_intensity = Column(Float, nullable=True)
+    region_savings_pct = Column(Float, nullable=True)
+
+    # Water usage
+    water_liters_baseline = Column(Float, nullable=True)
+    water_liters_optimized = Column(Float, nullable=True)
+    water_wue = Column(Float, nullable=True)
 
     # Error / metadata
     error_message = Column(Text, nullable=True)

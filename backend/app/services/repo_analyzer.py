@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import os
@@ -47,6 +48,48 @@ NEGATIVE_PATTERNS = [
     (r"model\.predict\s*\(", -10, "predict_only"),
 ]
 
+# --- Patterns for multi-file role classification ---
+
+MODEL_PATTERNS = [
+    (r"class\s+\w+\s*\(.*nn\.Module\)", 50, "nn_module"),
+    (r"class\s+\w+\s*\(.*PreTrainedModel\)", 50, "pretrained_model"),
+    (r"class\s+\w+\s*\(.*tf\.keras\.Model\)", 50, "keras_model"),
+    (r"nn\.Linear|nn\.Conv\d?d|nn\.MultiheadAttention", 30, "nn_layers"),
+    (r"self\.attention|self\.self_attn|self\.q_proj|self\.v_proj", 40, "attention"),
+    (r"nn\.TransformerEncoder|nn\.TransformerDecoder", 35, "transformer"),
+    (r"def\s+forward\s*\(self", 40, "forward_method"),
+]
+
+DATALOADER_PATTERNS = [
+    (r"DataLoader\s*\(", 50, "dataloader_init"),
+    (r"Dataset\s*\(|torch\.utils\.data", 40, "dataset"),
+    (r"tf\.data\.Dataset", 40, "tf_dataset"),
+    (r"collate_fn", 25, "collate_fn"),
+    (r"class\s+\w+\s*\(.*Dataset\)", 45, "dataset_class"),
+]
+
+CONFIG_PATTERNS = [
+    (r"TrainingArguments\s*\(", 60, "training_args"),
+    (r"@dataclass[\s\S]{0,50}class\s+\w*[Cc]onfig", 40, "config_dataclass"),
+    (r"num_train_epochs|learning_rate|per_device_train_batch_size", 35, "hf_config"),
+    (r"argparse\.ArgumentParser", 30, "argparse"),
+]
+
+# Maps (role, patch_type) → optimization to apply
+ROLE_OPTIMIZATION_MAP = {
+    ("entrypoint", "amp"): "amp",
+    ("entrypoint", "lora"): "lora",
+    ("entrypoint", "both"): "amp+lora",
+    ("model", "lora"): "lora",
+    ("model", "both"): "lora",
+    ("dataloader", "amp"): "dataloader_opts",
+    ("dataloader", "lora"): "dataloader_opts",
+    ("dataloader", "both"): "dataloader_opts",
+    ("config", "amp"): "config_update",
+    ("config", "lora"): "config_update",
+    ("config", "both"): "config_update",
+}
+
 # Files/dirs to skip during scanning
 SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -69,6 +112,16 @@ class DetectionResult:
     framework: Optional[str] = None
     reasoning: str = ""
     confidence: str = "low"
+
+
+@dataclass
+class PatchableFile:
+    """A file identified as a candidate for optimization."""
+    path: str          # relative to repo root
+    role: str          # "entrypoint" | "model" | "dataloader" | "config"
+    optimization: str  # "amp" | "lora" | "dataloader_opts" | "config_update" | "amp+lora"
+    content: str       # file contents
+    reason: str        # why this file was selected
 
 
 class RepoAnalyzer:
@@ -535,10 +588,145 @@ Respond with ONLY valid JSON:
 
         return "\n".join(found) if found else ""
 
+    # ---- Multi-file detection ----
+
+    def _resolve_local_import_files(
+        self, repo_path: Path, entrypoint_file: str
+    ) -> list[tuple[str, str]]:
+        """Return (relative_path, content) pairs for locally imported modules."""
+        entrypoint_path = repo_path / entrypoint_file
+        try:
+            source = entrypoint_path.read_text(errors="ignore")
+            tree = ast.parse(source)
+        except Exception:
+            return []
+
+        local_modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local_modules.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    local_modules.add(node.module.split(".")[0])
+
+        results: list[tuple[str, str]] = []
+        ep_dir = entrypoint_path.parent
+
+        for mod_name in sorted(local_modules):
+            candidates = [
+                repo_path / f"{mod_name}.py",
+                repo_path / mod_name / "__init__.py",
+                repo_path / mod_name / "model.py",
+                repo_path / mod_name / "models.py",
+                repo_path / mod_name / "network.py",
+                repo_path / mod_name / "net.py",
+                repo_path / mod_name / "config.py",
+                repo_path / mod_name / "data.py",
+                repo_path / mod_name / "dataset.py",
+                repo_path / mod_name / "dataloader.py",
+            ]
+            if ep_dir != repo_path:
+                candidates.extend([
+                    ep_dir / f"{mod_name}.py",
+                    ep_dir / mod_name / "__init__.py",
+                    ep_dir / mod_name / "model.py",
+                    ep_dir / mod_name / "models.py",
+                ])
+
+            for cand in candidates:
+                if cand.exists() and cand.is_file():
+                    try:
+                        content = cand.read_text(errors="ignore")
+                    except Exception:
+                        continue
+                    rel = str(cand.relative_to(repo_path))
+                    if rel == entrypoint_file:
+                        continue
+                    results.append((rel, content))
+                    break
+        return results
+
+    @staticmethod
+    def _classify_file(content: str) -> tuple[str, int, str]:
+        """Classify a file by role using pattern scoring. Returns (role, score, reason)."""
+        scores: dict[str, tuple[int, list[str]]] = {
+            "model": (0, []),
+            "dataloader": (0, []),
+            "config": (0, []),
+        }
+        for pattern, points, label in MODEL_PATTERNS:
+            if re.search(pattern, content):
+                scores["model"] = (scores["model"][0] + points, scores["model"][1] + [label])
+        for pattern, points, label in DATALOADER_PATTERNS:
+            if re.search(pattern, content):
+                scores["dataloader"] = (scores["dataloader"][0] + points, scores["dataloader"][1] + [label])
+        for pattern, points, label in CONFIG_PATTERNS:
+            if re.search(pattern, content):
+                scores["config"] = (scores["config"][0] + points, scores["config"][1] + [label])
+
+        best_role = max(scores, key=lambda r: scores[r][0])
+        best_score = scores[best_role][0]
+        reason = ", ".join(scores[best_role][1]) if scores[best_role][1] else "low confidence"
+        return best_role, best_score, reason
+
+    def identify_patchable_files(
+        self,
+        repo_path: Path,
+        entrypoint_file: str,
+        framework: str,
+        patch_type: str,
+        max_files: int = 5,
+    ) -> list[PatchableFile]:
+        """
+        Identify files in the repo that can benefit from optimization.
+        Always includes the entrypoint. Also checks local imports for
+        model definitions, data loaders, and config files.
+        """
+        entrypoint_path = repo_path / entrypoint_file
+        entrypoint_content = entrypoint_path.read_text(errors="ignore")
+
+        # Determine entrypoint optimization
+        ep_opt = ROLE_OPTIMIZATION_MAP.get(("entrypoint", patch_type), patch_type)
+        result = [PatchableFile(
+            path=entrypoint_file,
+            role="entrypoint",
+            optimization=ep_opt,
+            content=entrypoint_content,
+            reason="main training script",
+        )]
+
+        # Resolve local imports and classify each
+        import_files = self._resolve_local_import_files(repo_path, entrypoint_file)
+        for rel_path, content in import_files:
+            if len(result) >= max_files:
+                break
+
+            role, score, reason = self._classify_file(content)
+
+            if score < 30:
+                continue
+
+            opt = ROLE_OPTIMIZATION_MAP.get((role, patch_type))
+            if not opt:
+                continue
+
+            result.append(PatchableFile(
+                path=rel_path,
+                role=role,
+                optimization=opt,
+                content=content,
+                reason=reason,
+            ))
+
+        logger.info(f"[Analyzer] Identified {len(result)} patchable files")
+        for pf in result:
+            logger.info(f"  {pf.path} role={pf.role} opt={pf.optimization} ({pf.reason})")
+
+        return result
+
     def _resolve_local_imports(self, repo_path: Path, entrypoint_file: str) -> str:
         """Parse the entrypoint's imports and read locally-defined modules."""
-        import ast
-
         entrypoint_path = repo_path / entrypoint_file
         try:
             source = entrypoint_path.read_text(errors="ignore")

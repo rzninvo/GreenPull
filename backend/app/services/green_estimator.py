@@ -145,8 +145,9 @@ class ComparisonMetrics:
 
 
 class GreenEstimator:
-    def __init__(self, country_code: str = "USA"):
+    def __init__(self, country_code: str = "USA", carbon_intensity_override: float | None = None):
         self.country_code = country_code.upper()
+        self.carbon_intensity_override = carbon_intensity_override
 
     def resolve_hardware(self, training_config: TrainingConfig) -> HardwareConfig:
         """Map GPT's hardware description to concrete TDP values."""
@@ -205,7 +206,11 @@ class GreenEstimator:
         gpu_energy = hw.pue * gpu_power * hours / 1000.0
         mem_energy = hw.pue * mem_power * hours / 1000.0
 
-        ci = CARBON_INTENSITY.get(self.country_code, CARBON_INTENSITY["WORLD"])
+        ci = (
+            self.carbon_intensity_override
+            if self.carbon_intensity_override is not None
+            else CARBON_INTENSITY.get(self.country_code, CARBON_INTENSITY["WORLD"])
+        )
         carbon_kg = total_energy * ci / 1000.0
 
         logger.info(f"[Estimate] Power: {total_power:.1f}W "

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.db_models import Job, JobStatus
+from app.services.electricity_maps_service import ElectricityMapsService
 from app.services.green_estimator import GreenEstimator, TrainingConfig
 from app.services.patch_engine import PatchEngine
 from app.services.repo_analyzer import RepoAnalyzer
@@ -93,6 +94,15 @@ def run_pipeline(
             detection_reasoning=detection.reasoning,
         )
 
+        # --- 2b. Identify patchable files ---
+        logger.info("[Pipeline] STEP 2b: Identifying patchable files")
+        patchable_files = analyzer.identify_patchable_files(
+            repo_path=clone_path,
+            entrypoint_file=detection.entrypoint_file,
+            framework=detection.framework or "unknown",
+            patch_type=patch_type,
+        )
+
         # --- 3. Extract training config via GPT ---
         logger.info("[Pipeline] STEP 3: Extracting training configuration")
         _update_job(db, job_id, status=JobStatus.EXTRACTING_CONFIG)
@@ -124,11 +134,30 @@ def run_pipeline(
         logger.info(f"[Pipeline] Extracted config:\n{json.dumps(baseline_config, indent=2)}")
         _update_job(db, job_id, training_config_json=json.dumps(baseline_config))
 
+        # --- 3b. Fetch real-time carbon intensity from Electricity Maps ---
+        logger.info("[Pipeline] STEP 3b: Fetching real-time carbon intensity")
+        emaps = ElectricityMapsService()
+        ci_result = emaps.get_carbon_intensity(country_iso_code)
+        logger.info(
+            f"[Pipeline] Carbon intensity: {ci_result.carbon_intensity} gCO2/kWh "
+            f"(zone={ci_result.zone}, source={ci_result.source})"
+        )
+        _update_job(
+            db, job_id,
+            carbon_intensity_gco2_kwh=ci_result.carbon_intensity,
+            carbon_intensity_source=ci_result.source,
+            carbon_intensity_zone=ci_result.zone,
+            carbon_intensity_datetime=ci_result.datetime_utc,
+        )
+
         # --- 4. Estimate baseline emissions ---
         logger.info("[Pipeline] STEP 4: Estimating BASELINE emissions")
         _update_job(db, job_id, status=JobStatus.ESTIMATING_BASELINE)
 
-        estimator = GreenEstimator(country_code=country_iso_code)
+        estimator = GreenEstimator(
+            country_code=country_iso_code,
+            carbon_intensity_override=ci_result.carbon_intensity,
+        )
         training_cfg = _dict_to_training_config(baseline_config, detection.framework or "unknown")
         hw_config = estimator.resolve_hardware(training_cfg)
         baseline_result = estimator.estimate_emissions(training_cfg, hw_config)
@@ -156,24 +185,65 @@ def run_pipeline(
                 "pue": hw_config.pue,
             }),
             country_code=country_iso_code,
-            carbon_intensity_gco2_kwh=baseline_result.carbon_intensity,
         )
 
-        # --- 5. Apply patch ---
-        logger.info(f"[Pipeline] STEP 5: Applying {patch_type} patch")
+        # --- 5. Apply patch (multi-file) ---
+        logger.info(f"[Pipeline] STEP 5: Applying {patch_type} patch to {len(patchable_files)} file(s)")
         _update_job(db, job_id, status=JobStatus.PATCHING)
         patcher = PatchEngine()
-        patched_code, diff = patcher.apply_patch(
-            repo_path=clone_path,
-            entrypoint_file=detection.entrypoint_file,
-            framework=detection.framework or "unknown",
+
+        if len(patchable_files) > 1:
+            multi_result = patcher.apply_multi_file_patch(
+                patchable_files=patchable_files,
+                framework=detection.framework or "unknown",
+                patch_type=patch_type,
+                dep_context=dep_context,
+                config_context=config_context,
+                readme_context=readme_context,
+            )
+            diff = multi_result.combined_diff
+            # Entrypoint patched code for backward compat
+            ep_patch = next(
+                (fp for fp in multi_result.file_patches if fp.role == "entrypoint"), None
+            )
+            patched_code = ep_patch.patched_code if ep_patch else original_code
+            patched_files_data = json.dumps([
+                {
+                    "file_path": fp.file_path,
+                    "role": fp.role,
+                    "optimization": fp.optimization,
+                    "patched_code": fp.patched_code,
+                }
+                for fp in multi_result.file_patches
+            ])
+        else:
+            patched_code, diff = patcher.apply_patch(
+                repo_path=clone_path,
+                entrypoint_file=detection.entrypoint_file,
+                framework=detection.framework or "unknown",
+                patch_type=patch_type,
+                dep_context=dep_context,
+                config_context=config_context,
+                imports_context=imports_context,
+                readme_context=readme_context,
+            )
+            # Rewrite diff with git-style headers for consistent frontend parsing
+            if patched_code and patched_code != original_code:
+                diff = PatchEngine._make_file_diff(detection.entrypoint_file, original_code, patched_code)
+            patched_files_data = json.dumps([{
+                "file_path": detection.entrypoint_file,
+                "role": "entrypoint",
+                "optimization": patch_type,
+                "patched_code": patched_code,
+            }])
+
+        _update_job(
+            db, job_id,
             patch_type=patch_type,
-            dep_context=dep_context,
-            config_context=config_context,
-            imports_context=imports_context,
-            readme_context=readme_context,
+            patch_diff=diff,
+            patched_code=patched_code,
+            patched_files_json=patched_files_data,
         )
-        _update_job(db, job_id, patch_type=patch_type, patch_diff=diff, patched_code=patched_code)
 
         # --- 6. Estimate optimized emissions ---
         logger.info("[Pipeline] STEP 6: Estimating OPTIMIZED emissions")
@@ -239,7 +309,6 @@ def run_pipeline(
 
         _update_job(
             db, job_id,
-            status=JobStatus.COMPLETED,
             emissions_saved_kg=em_saved,
             emissions_saved_pct=em_pct,
             energy_saved_kwh=en_saved,
@@ -251,6 +320,65 @@ def run_pipeline(
             streaming_hours=comparisons.streaming_hours,
             flight_fraction=comparisons.flight_fraction,
             led_bulb_hours=comparisons.led_bulb_hours,
+        )
+
+        # --- 8. Green window forecast ---
+        logger.info("[Pipeline] STEP 8: Fetching green window forecast")
+        runtime_hours = training_cfg.estimated_runtime_hours
+        green_window = emaps.get_green_window(country_iso_code, runtime_hours)
+        if green_window:
+            logger.info(
+                f"[Pipeline] Green window: {green_window.best_window_start} to "
+                f"{green_window.best_window_end} ({green_window.best_intensity} gCO2/kWh)"
+            )
+            _update_job(
+                db, job_id,
+                green_window_start=green_window.best_window_start,
+                green_window_end=green_window.best_window_end,
+                green_window_intensity=green_window.best_intensity,
+                current_grid_intensity=green_window.current_intensity,
+                green_window_savings_pct=green_window.additional_savings_pct,
+            )
+        else:
+            logger.info("[Pipeline] Green window: forecast not available")
+
+        # --- 9. Region recommendation ---
+        logger.info("[Pipeline] STEP 9: Computing region recommendation")
+        region_rec = emaps.get_region_recommendation(country_iso_code, current_ci=ci_result)
+        if region_rec:
+            rec = region_rec.recommended
+            logger.info(
+                f"[Pipeline] Recommended region: {rec.provider} {rec.region_code} "
+                f"({rec.city}, {rec.country_name}) = {rec.carbon_intensity} gCO2/kWh "
+                f"(saves {region_rec.savings_pct}%)"
+            )
+            _update_job(
+                db, job_id,
+                recommended_region_provider=rec.provider,
+                recommended_region_code=rec.region_code,
+                recommended_region_name=f"{rec.city}, {rec.country_name}" if rec.city else rec.country_name,
+                recommended_region_country=rec.country_name,
+                recommended_region_city=rec.city,
+                recommended_region_intensity=rec.carbon_intensity,
+                region_savings_pct=region_rec.savings_pct,
+            )
+
+        # --- 10. Water usage ---
+        logger.info("[Pipeline] STEP 10: Estimating water usage")
+        water = ElectricityMapsService.estimate_water_usage(
+            baseline_energy_kwh=baseline_result.energy_kwh,
+            optimized_energy_kwh=optimized_result.energy_kwh,
+        )
+        logger.info(
+            f"[Pipeline] Water: {water.water_liters_baseline:.4f}L baseline, "
+            f"{water.water_liters_optimized:.4f}L optimized (WUE={water.wue})"
+        )
+        _update_job(
+            db, job_id,
+            status=JobStatus.COMPLETED,
+            water_liters_baseline=water.water_liters_baseline,
+            water_liters_optimized=water.water_liters_optimized,
+            water_wue=water.wue,
         )
 
         logger.info(f"[Pipeline] DONE job={job_id[:8]}")

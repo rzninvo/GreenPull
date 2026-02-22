@@ -66,6 +66,28 @@ class GitHubService:
             )
         return {"commit_sha": result["commit"].sha}
 
+    def create_multi_file_optimization_pr(
+        self,
+        file_patches: list[dict],
+        title: str,
+        body: str,
+        branch_name: str = "greenpull/optimization",
+        base_branch: str = "main",
+    ) -> dict:
+        """Full flow: create branch, push ALL patched files, open PR."""
+        self.create_branch(branch_name, base_branch)
+        for i, fp in enumerate(file_patches):
+            msg = f"{title} ({i+1}/{len(file_patches)}: {fp['file_path']})" if len(file_patches) > 1 else title
+            self.update_file(
+                file_path=fp["file_path"],
+                content=fp["patched_code"],
+                commit_message=msg,
+                branch_name=branch_name,
+            )
+        pr = self.repo.create_pull(base=base_branch, head=branch_name, title=title, body=body)
+        logger.info(f"[GitHub] Created multi-file PR #{pr.number}: {pr.html_url}")
+        return {"number": pr.number, "url": pr.html_url}
+
     def create_optimization_pr(
         self,
         file_path: str,

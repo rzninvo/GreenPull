@@ -11,7 +11,7 @@ type Section =
   | { kind: "collapsed"; pairs: Pair[]; count: number };
 
 const CodeDiff = ({ diff }: { diff: FileDiff }) => {
-  const [fileExpanded, setFileExpanded] = useState(true);
+  const [fileExpanded, setFileExpanded] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Set<number>>(new Set());
 
   const pairs = useMemo(() => {
@@ -81,6 +81,10 @@ const CodeDiff = ({ diff }: { diff: FileDiff }) => {
     }
     return result;
   }, [pairs]);
+
+  // Stats for collapsed summary
+  const addedCount = diff.lines.filter((l) => l.type === "added").length;
+  const removedCount = diff.lines.filter((l) => l.type === "removed").length;
 
   const toggleSection = (idx: number) => {
     setExpandedSections((prev) => {
@@ -155,13 +159,22 @@ const CodeDiff = ({ diff }: { diff: FileDiff }) => {
           )}
           <span className="font-mono text-sm font-medium text-foreground">{diff.filename}</span>
           <Badge variant="secondary" className="text-xs font-normal">{diff.optimization}</Badge>
+          <span className="text-xs text-muted-foreground">
+            <span className="text-green-600">+{addedCount}</span>{" "}
+            <span className="text-red-500">−{removedCount}</span>
+          </span>
         </div>
-        {diff.co2Savings && (
-          <div className="flex items-center gap-1.5 text-xs text-green-700 bg-green-50 px-2.5 py-1 rounded-full">
-            <Leaf className="h-3 w-3" />
-            {diff.co2Savings}
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {diff.co2Savings && (
+            <div className="flex items-center gap-1.5 text-xs text-green-700 bg-green-50 px-2.5 py-1 rounded-full">
+              <Leaf className="h-3 w-3" />
+              {diff.co2Savings}
+            </div>
+          )}
+          {!fileExpanded && (
+            <span className="text-xs text-blue-600">Click to expand</span>
+          )}
+        </div>
       </div>
 
       {/* Diff body */}

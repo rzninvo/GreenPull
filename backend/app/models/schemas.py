@@ -64,6 +64,45 @@ class ComparisonMetricsResponse(BaseModel):
     led_bulb_hours: Optional[float] = None
 
 
+class CarbonIntensityInfo(BaseModel):
+    value: Optional[float] = None
+    zone: Optional[str] = None
+    source: Optional[str] = None  # "api" or "static_fallback"
+    datetime_utc: Optional[str] = None
+
+
+class GreenWindowResponse(BaseModel):
+    best_window_start: Optional[str] = None
+    best_window_end: Optional[str] = None
+    best_intensity: Optional[float] = None
+    current_intensity: Optional[float] = None
+    savings_pct: Optional[float] = None
+
+
+class RegionRecommendationResponse(BaseModel):
+    current_zone: Optional[str] = None
+    current_intensity: Optional[float] = None
+    recommended_provider: Optional[str] = None
+    recommended_region_code: Optional[str] = None
+    recommended_region_name: Optional[str] = None
+    recommended_country: Optional[str] = None
+    recommended_city: Optional[str] = None
+    recommended_intensity: Optional[float] = None
+    savings_pct: Optional[float] = None
+
+
+class WaterUsageResponse(BaseModel):
+    baseline_liters: Optional[float] = None
+    optimized_liters: Optional[float] = None
+    wue: Optional[float] = None
+
+
+class PatchedFileInfo(BaseModel):
+    file_path: str
+    role: str
+    optimization: str
+
+
 class CreatePRRequest(BaseModel):
     github_token: str
     title: str = ""
@@ -91,4 +130,9 @@ class JobStatusResponse(BaseModel):
     patch_diff: Optional[str] = None
     savings: Optional[dict] = None
     comparisons: Optional[ComparisonMetricsResponse] = None
+    carbon_intensity_info: Optional[CarbonIntensityInfo] = None
+    green_window: Optional[GreenWindowResponse] = None
+    region_recommendation: Optional[RegionRecommendationResponse] = None
+    water_usage: Optional[WaterUsageResponse] = None
+    patched_files: Optional[list[PatchedFileInfo]] = None
     error_message: Optional[str] = None
