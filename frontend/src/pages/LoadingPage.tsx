@@ -1,41 +1,82 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { pipelineSteps } from "@/data/mockData";
-import { Check, Loader2, Circle, Leaf } from "lucide-react";
+import { getJobStatus, type JobResponse } from "@/api/client";
+import { Check, Loader2, Circle, Leaf, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 type StepStatus = "pending" | "in_progress" | "done";
 
+const STEPS = [
+  { label: "Cloning repository", statuses: ["cloning"] },
+  { label: "Detecting training entrypoint", statuses: ["analyzing"] },
+  { label: "Extracting training configuration", statuses: ["extracting_config"] },
+  { label: "Estimating baseline emissions", statuses: ["estimating_baseline"] },
+  { label: "Generating optimization patch", statuses: ["patching"] },
+  { label: "Estimating optimized emissions", statuses: ["estimating_optimized"] },
+];
+
+function getStepStatuses(backendStatus: string): StepStatus[] {
+  const statusOrder = [
+    "cloning", "analyzing", "extracting_config",
+    "estimating_baseline", "patching", "estimating_optimized",
+  ];
+  const currentIdx = statusOrder.indexOf(backendStatus);
+  if (currentIdx === -1) return STEPS.map(() => "pending");
+  return STEPS.map((_, i) => {
+    if (i < currentIdx) return "done";
+    if (i === currentIdx) return "in_progress";
+    return "pending";
+  });
+}
+
 const LoadingPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const repoUrl = (location.state as any)?.repoUrl || "https://github.com/example/repo";
-  const [statuses, setStatuses] = useState<StepStatus[]>(pipelineSteps.map(() => "pending"));
+  const state = location.state as { jobId?: string; repoUrl?: string } | null;
+  const jobId = state?.jobId;
+  const repoUrl = state?.repoUrl || "";
+
+  const [statuses, setStatuses] = useState<StepStatus[]>(STEPS.map(() => "pending"));
+  const [error, setError] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    let timeout: ReturnType<typeof setTimeout>;
-    let currentStep = 0;
+    if (!jobId) {
+      navigate("/");
+      return;
+    }
 
-    const advance = () => {
-      if (currentStep >= pipelineSteps.length) {
-        // All done — navigate after brief pause
-        timeout = setTimeout(() => navigate("/results", { state: { repoUrl } }), 600);
-        return;
+    const poll = async () => {
+      try {
+        const job: JobResponse = await getJobStatus(jobId);
+
+        if (job.status === "completed") {
+          setStatuses(STEPS.map(() => "done"));
+          setTimeout(() => {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            navigate("/results", { state: { job, repoUrl } });
+          }, 600);
+          return;
+        }
+
+        if (job.status === "failed") {
+          if (intervalRef.current) clearInterval(intervalRef.current);
+          setError(job.error_message || "Analysis failed");
+          return;
+        }
+
+        setStatuses(getStepStatuses(job.status));
+      } catch (e: any) {
+        console.error("Poll error:", e);
       }
-      // Set current step to in_progress
-      setStatuses((prev) => prev.map((s, i) => (i === currentStep ? "in_progress" : s)));
-
-      // After duration, mark done and advance
-      timeout = setTimeout(() => {
-        setStatuses((prev) => prev.map((s, i) => (i === currentStep ? "done" : s)));
-        currentStep++;
-        setTimeout(advance, 300);
-      }, pipelineSteps[currentStep].duration);
     };
 
-    advance();
-    return () => clearTimeout(timeout);
-  }, [navigate, repoUrl]);
+    poll();
+    intervalRef.current = setInterval(poll, 2000);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [jobId, navigate, repoUrl]);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-background px-4">
@@ -49,9 +90,9 @@ const LoadingPage = () => {
         </div>
 
         <div className="space-y-1">
-          {pipelineSteps.map((step, i) => (
+          {STEPS.map((step, i) => (
             <div
-              key={step.id}
+              key={i}
               className={`flex items-center gap-3 py-3 px-4 rounded-lg transition-all duration-300 ${
                 statuses[i] === "in_progress"
                   ? "bg-blue-50 text-blue-700"
@@ -75,6 +116,16 @@ const LoadingPage = () => {
             </div>
           ))}
         </div>
+
+        {error && (
+          <div className="flex items-start gap-3 p-4 rounded-lg bg-red-50 text-red-700 text-sm">
+            <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">Analysis failed</p>
+              <p className="mt-1 text-xs font-mono whitespace-pre-wrap">{error}</p>
+            </div>
+          </div>
+        )}
 
         <Button
           variant="outline"

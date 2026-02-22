@@ -152,8 +152,36 @@ carbon (g CO2) = energy * carbon_intensity(country)
 - Carbon intensity for 30+ countries from CodeCarbon/IEA data
 - PUE: 1.0 (local) or 1.2 (cloud)
 
+## Frontend
+
+The web UI is a React + TypeScript app built with Vite, Tailwind CSS, and shadcn/ui.
+
+### Prerequisites
+
+- Node.js 18+ (for `node:` protocol imports)
+- npm, yarn, or bun
+
+### Install & Run
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The dev server starts on `http://localhost:8080` and proxies `/api/*` requests to the backend at `localhost:8000`. Make sure the backend is running first.
+
+### Build for Production
+
+```bash
+cd frontend
+npm run build
+npm run preview
+```
+
 ## Stack
 
+- **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS + shadcn/ui + Recharts
 - **API**: FastAPI + SQLite + SQLAlchemy
 - **Queue**: Redis + RQ
 - **Detection**: Regex heuristics + OpenAI GPT (iterative analysis)
