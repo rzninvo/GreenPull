@@ -3,9 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { BarChart3, Cpu, Leaf, Loader2 } from "lucide-react";
+import { BarChart3, Cpu, Leaf, Loader2, Info } from "lucide-react";
 import { submitAnalysis } from "@/api/client";
 import InfoButton from "@/components/inform_buttons/InfoButton";
+import {
+  HoverCard,
+  HoverCardTrigger,
+  HoverCardContent,
+} from "@/components/ui/hover-card";
 
 const COUNTRIES = [
   { code: "DEU", label: "Germany" },
@@ -106,27 +111,66 @@ const LandingPage = () => {
               </Button>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-3">
-              <select
-                value={patchType}
-                onChange={(e) => setPatchType(e.target.value)}
-                className="h-10 px-3 rounded-md border border-input bg-background text-sm flex-1"
-                disabled={loading}
-              >
-                <option value="amp">AMP (Mixed Precision)</option>
-                <option value="lora">LoRA (Parameter-Efficient)</option>
-                <option value="both">Both (AMP + LoRA)</option>
-              </select>
-              <select
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-                className="h-10 px-3 rounded-md border border-input bg-background text-sm flex-1"
-                disabled={loading}
-              >
-                {COUNTRIES.map((c) => (
-                  <option key={c.code} value={c.code}>{c.label} ({c.code})</option>
-                ))}
-              </select>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1 space-y-1.5">
+                <div className="flex items-center gap-1.5 justify-start">
+                  <span className="text-xs font-medium text-foreground">Optimization Strategy</span>
+                  <HoverCard openDelay={200} closeDelay={100}>
+                    <HoverCardTrigger asChild>
+                      <Info className="h-3.5 w-3.5 text-muted-foreground/50 hover:text-muted-foreground cursor-help transition-colors" />
+                    </HoverCardTrigger>
+                    <HoverCardContent className="w-80 text-sm space-y-2" side="top">
+                      <p className="font-medium text-foreground">Choose how to optimize your training code</p>
+                      <div className="space-y-1.5 text-muted-foreground">
+                        <p><strong className="text-foreground">AMP</strong> — Automatic Mixed Precision casts float32 ops to float16, cutting GPU memory by ~50% and training time by ~30%. Best for most workloads.</p>
+                        <p><strong className="text-foreground">LoRA</strong> — Low-Rank Adaptation freezes base weights and trains small adapter matrices, reducing trainable parameters by ~90%. Ideal for fine-tuning large models.</p>
+                        <p><strong className="text-foreground">Both</strong> — Applies AMP + LoRA together for maximum savings. Recommended if your model supports both.</p>
+                      </div>
+                    </HoverCardContent>
+                  </HoverCard>
+                </div>
+                <select
+                  value={patchType}
+                  onChange={(e) => setPatchType(e.target.value)}
+                  className="h-10 w-full px-3 rounded-md border border-input bg-background text-sm"
+                  disabled={loading}
+                >
+                  <option value="amp">AMP (Mixed Precision)</option>
+                  <option value="lora">LoRA (Parameter-Efficient)</option>
+                  <option value="both">Both (AMP + LoRA)</option>
+                </select>
+                <p className="text-[11px] text-muted-foreground/70 text-left">Affects energy usage & training time</p>
+              </div>
+
+              <div className="flex-1 space-y-1.5">
+                <div className="flex items-center gap-1.5 justify-start">
+                  <span className="text-xs font-medium text-foreground">Training Region</span>
+                  <HoverCard openDelay={200} closeDelay={100}>
+                    <HoverCardTrigger asChild>
+                      <Info className="h-3.5 w-3.5 text-muted-foreground/50 hover:text-muted-foreground cursor-help transition-colors" />
+                    </HoverCardTrigger>
+                    <HoverCardContent className="w-80 text-sm space-y-2" side="top">
+                      <p className="font-medium text-foreground">Where will your model be trained?</p>
+                      <div className="space-y-1.5 text-muted-foreground">
+                        <p>The electrical grid's <strong className="text-foreground">carbon intensity</strong> varies dramatically by country depending on the energy mix (renewables vs fossil fuels).</p>
+                        <p>For example, Sweden (~30 gCO₂/kWh, mostly hydro) produces ~10x less carbon per kWh than Poland (~700 gCO₂/kWh, mostly coal).</p>
+                        <p>This directly scales your CO₂ emissions estimate. Live data is fetched from the <strong className="text-foreground">Electricity Maps</strong> API when available.</p>
+                      </div>
+                    </HoverCardContent>
+                  </HoverCard>
+                </div>
+                <select
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  className="h-10 w-full px-3 rounded-md border border-input bg-background text-sm"
+                  disabled={loading}
+                >
+                  {COUNTRIES.map((c) => (
+                    <option key={c.code} value={c.code}>{c.label} ({c.code})</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted-foreground/70 text-left">Affects CO₂ emissions estimate</p>
+              </div>
             </div>
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
